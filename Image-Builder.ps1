@@ -1,110 +1,100 @@
 # =====================================================
-# AIB Template Deployment - GitHub Bootstrap Approach
+# AIB Bootstrapper – Image Customization Only
 # =====================================================
-
 $ErrorActionPreference = 'Stop'
 
-# Configuration
-$resourceGroup = "Test-Image-Builder"
-$templateName = "AVD-Win11-AppInstall-Template"
-$storageAccount = "azuremarketplacetesting"
-$container = "image"
-$identityName = "aibIdentity"
-$appScriptName = "02-App-Install-FINAL.ps1"
+# -------- Configuration --------
+$StorageAccount = "azuremarketplacetesting"
+$Container      = "image"
+$ScriptName     = "02-App-Install-FINAL.ps1"
+$TempPath       = "C:\AIB"
+$ScriptPath     = Join-Path $TempPath $ScriptName
+$BlobUri        = "https://$StorageAccount.blob.core.windows.net/$Container/$ScriptName"
 
 Write-Host "=============================================="
-Write-Host "AIB Deployment - GitHub Bootstrap Method"
+Write-Host "AIB Bootstrapper – Managed Identity Mode"
 Write-Host "=============================================="
-Write-Host ""
 
-# Step 1 — Verify managed identity + RBAC
-Write-Host "[1/4] Verifying managed identity permissions..." -ForegroundColor Yellow
+# -------- Prep --------
+if (-not (Test-Path $TempPath)) {
+    New-Item -Path $TempPath -ItemType Directory | Out-Null
+}
 
-$identity = Get-AzUserAssignedIdentity -ResourceGroupName $resourceGroup -Name $identityName -ErrorAction SilentlyContinue
-if (-not $identity) {
-    Write-Host "ERROR: Managed identity '$identityName' not found." -ForegroundColor Red
+# -------- Step 1: get a Bearer token from IMDS --------
+# This VM has a managed identity.  IMDS is the only way
+# to get a credential inside an AIB VM without installing
+# Az modules or hard-coding keys.
+#
+# The token is scoped to storage.azure.com — it is only
+# valid for Blob/Table/Queue/File storage endpoints.
+Write-Host "Requesting OAuth2 token from IMDS..." -ForegroundColor Yellow
+
+$imdsUri  = "http://169.254.169.254/metadata/identity/oauth2/token" +
+            "?api-version=2021-01-01&resource=https://storage.azure.com"
+
+$tokenResponse = Invoke-RestMethod `
+    -Uri     $imdsUri `
+    -Headers @{ Metadata = "true" } `
+    -Method  GET
+
+$bearerToken = $tokenResponse.access_token
+
+if (-not $bearerToken) {
+    Write-Host "ERROR: IMDS returned no access_token. Managed identity may not be attached." -ForegroundColor Red
     exit 1
 }
 
-$storage = Get-AzStorageAccount -ResourceGroupName $resourceGroup -Name $storageAccount
+Write-Host "Token acquired." -ForegroundColor Green
 
-Write-Host "      Identity: $identityName" -ForegroundColor Gray
-Write-Host "      Principal ID: $($identity.PrincipalId)" -ForegroundColor Gray
+# -------- Step 2: download the script using that token --------
+# Container is private (no anonymous access).
+# The Bearer token satisfies the auth requirement.
+# x-ms-version tells Blob Storage which API behaviour to use.
+Write-Host "Downloading app install script from blob..." -ForegroundColor Yellow
+Write-Host "URI: $BlobUri" -ForegroundColor Gray
 
-$roleAssignment = Get-AzRoleAssignment `
-    -ObjectId $identity.PrincipalId `
-    -RoleDefinitionName "Storage Blob Data Reader" `
-    -Scope $storage.Id `
-    -ErrorAction SilentlyContinue
-
-if (-not $roleAssignment) {
-    Write-Host "      Granting Storage Blob Data Reader role..." -ForegroundColor Yellow
-    New-AzRoleAssignment `
-        -ObjectId $identity.PrincipalId `
-        -RoleDefinitionName "Storage Blob Data Reader" `
-        -Scope $storage.Id | Out-Null
-
-    Write-Host "      Waiting for RBAC propagation (5 min)..." -ForegroundColor Yellow
-    Start-Sleep -Seconds 300
-}
-else {
-    Write-Host "      RBAC already assigned" -ForegroundColor Green
+$blobHeaders = @{
+    "Authorization" = "Bearer $bearerToken"
+    "x-ms-version"  = "2021-08-06"
 }
 
-# Step 2 — Upload script to blob
-Write-Host "[2/4] Uploading app installation script..." -ForegroundColor Yellow
+Invoke-WebRequest `
+    -Uri     $BlobUri `
+    -Headers $blobHeaders `
+    -OutFile $ScriptPath `
+    -UseBasicParsing
 
-if (-not (Test-Path ".\$appScriptName")) {
-    Write-Host "ERROR: $appScriptName not found." -ForegroundColor Red
+# -------- Verify the download is a real file, not an error page --------
+# Invoke-WebRequest writes the response body regardless of status code.
+# On a 401/403 that body is an XML error page — Test-Path would still
+# return True.  Check that the file is at least non-trivial in size.
+if (-not (Test-Path $ScriptPath)) {
+    Write-Host "ERROR: Script file not found at $ScriptPath." -ForegroundColor Red
     exit 1
 }
 
-$ctx = $storage.Context
-
-# Ensure container exists
-$containerRef = Get-AzStorageContainer -Name $container -Context $ctx -ErrorAction SilentlyContinue
-if (-not $containerRef) {
-    New-AzStorageContainer -Name $container -Context $ctx | Out-Null
-    Write-Host "      Container created: $container" -ForegroundColor Green
+$fileSize = (Get-Item $ScriptPath).Length
+if ($fileSize -lt 100) {
+    Write-Host "ERROR: Downloaded file is $fileSize bytes — likely an auth error page, not the script." -ForegroundColor Red
+    Write-Host "       Contents:" -ForegroundColor Red
+    Get-Content $ScriptPath | Write-Host
+    exit 1
 }
 
-Set-AzStorageBlobContent `
-    -Container $container `
-    -File ".\$appScriptName" `
-    -Blob $appScriptName `
-    -Context $ctx `
-    -Force | Out-Null
+Write-Host "Download successful ($fileSize bytes)." -ForegroundColor Green
 
-Write-Host "      Upload complete" -ForegroundColor Green
+# -------- Execute installer --------
+Write-Host "Executing app installation script..." -ForegroundColor Yellow
 
-# Step 3 — Deploy AIB template
-Write-Host "[3/4] Deploying AIB template..." -ForegroundColor Yellow
+powershell.exe `
+    -ExecutionPolicy Bypass `
+    -NoProfile `
+    -File $ScriptPath
 
-$existing = Get-AzImageBuilderTemplate `
-    -ResourceGroupName $resourceGroup `
-    -Name $templateName `
-    -ErrorAction SilentlyContinue
-
-if ($existing) {
-    Remove-AzImageBuilderTemplate `
-        -ResourceGroupName $resourceGroup `
-        -Name $templateName `
-        -Force | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: App installation script exited with code $LASTEXITCODE." -ForegroundColor Red
+    exit 1
 }
 
-New-AzResourceGroupDeployment `
-    -ResourceGroupName $resourceGroup `
-    -TemplateFile ".\aib-template-GITHUB-BOOTSTRAP.json" `
-    -Verbose
-
-Write-Host "      Template deployed" -ForegroundColor Green
-
-# Step 4 — Start build
-Write-Host "[4/4] Starting image build..." -ForegroundColor Yellow
-
-Start-AzImageBuilderTemplate `
-    -ResourceGroupName $resourceGroup `
-    -Name $templateName `
-    -NoWait
-
-Write-Host "Build started." -ForegroundColor Green
+Write-Host "App installation completed successfully." -ForegroundColor Green
+Write-Host "AIB customization step finished." -ForegroundColor Green
