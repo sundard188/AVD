@@ -81,7 +81,7 @@ if ($fileSize -lt 100) {
     exit 1
 }
 
-Write-Host "Download successful ($fileSize bytes)." -ForegroundColor Green
+Write-Host "Download successful ($($fileSize) bytes)." -ForegroundColor Green
 
 # -------- Execute installer --------
 Write-Host "Executing app installation script..." -ForegroundColor Yellow
