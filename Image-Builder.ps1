@@ -1,5 +1,5 @@
 # =====================================================
-# AIB Bootstrapper – FINAL (GitHub → MI → Blob)
+# AIB Bootstrapper – FINAL AIB-SAFE (GitHub → MI → Blob)
 # =====================================================
 
 Set-StrictMode -Version Latest
@@ -13,9 +13,9 @@ try {
     $Container      = "image"
     $InstallerName  = "02-App-Install-FINAL.ps1"
 
-    $InstallerUri  = "https://$StorageAccount.blob.core.windows.net/$Container/$InstallerName"
-    $TempPath      = "C:\AIB"
-    $InstallerPath = Join-Path $TempPath $InstallerName
+    $TempPath       = "C:\AIB"
+    $InstallerPath  = Join-Path $TempPath $InstallerName
+    $InstallerUri   = "https://$StorageAccount.blob.core.windows.net/$Container/$InstallerName"
 
     # ---------------- Prep ----------------
     if (-not (Test-Path $TempPath)) {
@@ -26,14 +26,16 @@ try {
     Start-Transcript -Path $TranscriptPath -Append -Force
 
     Write-Host "=============================================="
-    Write-Host "AIB Bootstrapper – Managed Identity Mode"
+    Write-Host "AIB Bootstrapper - Managed Identity Mode"
     Write-Host "=============================================="
 
-    # ---------------- Acquire Managed Identity Token ----------------
-    Write-Host "Requesting Managed Identity token from IMDS..."
+    # ---------------- Managed Identity Token ----------------
+    Write-Host "Requesting Managed Identity token"
 
     $amp = [char]38
-$imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2021-02-01${amp}resource=https://storage.azure.com/"
+    $imdsBase = "http://169.254.169.254/metadata/identity/oauth2/token"
+    $imdsQuery = "api-version=2021-02-01${amp}resource=https://storage.azure.com/"
+    $imdsUri = "$imdsBase?$imdsQuery"
 
     $tokenResponse = Invoke-RestMethod `
         -Uri $imdsUri `
@@ -46,11 +48,10 @@ $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=20
         throw "Managed Identity token acquisition failed"
     }
 
-    Write-Host "Managed Identity token acquired."
+    Write-Host "Managed Identity token acquired"
 
-    # ---------------- Download Installer from Blob ----------------
-    Write-Host "Downloading installer from private Blob..."
-    Write-Host ("URI: {0}" -f $InstallerUri)
+    # ---------------- Download Installer ----------------
+    Write-Host "Downloading installer from private Blob"
 
     $headers = @{
         Authorization  = "Bearer $accessToken"
@@ -66,20 +67,21 @@ $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=20
 
     # ---------------- Validate Download ----------------
     if (-not (Test-Path $InstallerPath)) {
-        throw ("Installer not found at {0}" -f $InstallerPath)
+        throw "Installer file missing after download"
     }
 
     $fileSize = (Get-Item $InstallerPath).Length
+
     if ($fileSize -lt 1024) {
-        Write-Host "Downloaded content (diagnostic):"
+        Write-Host "Installer content diagnostic output"
         Get-Content $InstallerPath | Write-Host
-        throw ("Installer file too small ({0} bytes). Download failed." -f $fileSize)
+        throw ("Installer file too small. Size = {0} bytes" -f $fileSize)
     }
 
-    Write-Host ("Installer downloaded successfully ({0} bytes)." -f $fileSize)
+    Write-Host ("Installer download successful. Size = {0} bytes" -f $fileSize)
 
     # ---------------- Execute Installer ----------------
-    Write-Host "Executing installer script..."
+    Write-Host "Executing installer script"
 
     powershell.exe `
         -NoProfile `
@@ -87,19 +89,19 @@ $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=20
         -File $InstallerPath
 
     if ($LASTEXITCODE -ne 0) {
-        throw ("Installer exited with code {0}" -f $LASTEXITCODE)
+        throw ("Installer execution failed. Exit code = {0}" -f $LASTEXITCODE)
     }
 
-    Write-Host "Installer completed successfully."
-    Write-Host "Bootstrapper completed successfully."
+    Write-Host "Installer completed successfully"
+    Write-Host "Bootstrapper completed successfully"
 
     Stop-Transcript | Out-Null
     exit 0
 }
 catch {
     Write-Error "BOOTSTRAPPER FAILED"
-    Write-Error ("Error: {0}" -f $_.Exception.Message)
-    Write-Error ("Stack Trace: {0}" -f $_.ScriptStackTrace)
+    Write-Error ("Error message: {0}" -f $_.Exception.Message)
+    Write-Error ("Script stack trace: {0}" -f $_.ScriptStackTrace)
 
     if ($TranscriptPath) {
         Stop-Transcript | Out-Null
