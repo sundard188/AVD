@@ -32,7 +32,8 @@ try {
     # ---------------- Acquire Managed Identity Token ----------------
     Write-Host "Requesting Managed Identity token from IMDS..."
 
-    $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2021-02-01&resource=https://storage.azure.com/"
+    $amp = [char]38
+$imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2021-02-01${amp}resource=https://storage.azure.com/"
 
     $tokenResponse = Invoke-RestMethod `
         -Uri $imdsUri `
