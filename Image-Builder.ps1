@@ -30,7 +30,7 @@ try {
         -UseBasicParsing
 }
 catch {
-    throw "GitHub RAW download failed: $($_.Exception.Message)"
+    throw ("GitHub RAW download failed: {0}" -f $_.Exception.Message)
 }
 
 # ---------------- Validate ----------------
