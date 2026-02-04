@@ -1,21 +1,17 @@
 # =====================================================
-# AIB Bootstrapper – Image Customization (PRODUCTION)
+# AIB Bootstrapper – Public GitHub (RAW) – PRODUCTION
 # =====================================================
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ---------------- Configuration ----------------
-$StorageAccount = "azuremarketplacetesting"
-$Container      = "image"
-$ScriptName     = "02-App-Install-FINAL.ps1"
-
+$ScriptUri  = "https://raw.githubusercontent.com/sundard188/AVD/main/Image-Builder.ps1"
 $TempPath   = "C:\AIB"
-$ScriptPath = Join-Path $TempPath $ScriptName
-$BlobUri    = "https://$StorageAccount.blob.core.windows.net/$Container/$ScriptName"
+$ScriptPath = Join-Path $TempPath "Image-Builder.ps1"
 
 Write-Host "=============================================="
-Write-Host "AIB Bootstrapper (Managed Identity)"
+Write-Host "AIB Bootstrapper – Public GitHub RAW"
 Write-Host "=============================================="
 
 # ---------------- Prep ----------------
@@ -23,67 +19,38 @@ if (-not (Test-Path $TempPath)) {
     New-Item -Path $TempPath -ItemType Directory -Force | Out-Null
 }
 
-# ---------------- Get IMDS token ----------------
-Write-Host "Requesting OAuth2 token from IMDS..."
-
-$imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token" +
-           "?api-version=2021-01-01&resource=https://storage.azure.com"
-
-try {
-    $tokenResponse = Invoke-RestMethod `
-        -Uri $imdsUri `
-        -Headers @{ Metadata = "true" } `
-        -Method GET
-}
-catch {
-    throw "IMDS token request failed: $($_.Exception.Message)"
-}
-
-$bearerToken = $tokenResponse.access_token
-if (-not $bearerToken) {
-    throw "IMDS returned no access token. Managed Identity not available."
-}
-
-Write-Host "IMDS token acquired."
-
-# ---------------- Download script ----------------
-Write-Host "Downloading app install script from blob..."
-Write-Host "URI: $BlobUri"
-
-$blobHeaders = @{
-    Authorization  = "Bearer $bearerToken"
-    "x-ms-version" = "2021-08-06"
-}
+# ---------------- Download ----------------
+Write-Host "Downloading script from public GitHub RAW..."
+Write-Host "URI: $ScriptUri"
 
 try {
     Invoke-WebRequest `
-        -Uri $BlobUri `
-        -Headers $blobHeaders `
+        -Uri $ScriptUri `
         -OutFile $ScriptPath `
         -UseBasicParsing
 }
 catch {
-    throw "Blob download failed: $($_.Exception.Message)"
+    throw "GitHub RAW download failed: $($_.Exception.Message)"
 }
 
-# ---------------- Validate download ----------------
+# ---------------- Validate ----------------
 if (-not (Test-Path $ScriptPath)) {
     throw "Downloaded script not found at $ScriptPath"
 }
 
 $fileSize = (Get-Item $ScriptPath).Length
 if ($fileSize -lt 512) {
-    Write-Host "Downloaded file content (for diagnostics):"
+    Write-Host "Downloaded content (diagnostic):"
     Get-Content $ScriptPath | Write-Host
-    throw "Downloaded script too small ($fileSize bytes). Likely auth or HTML error."
+    throw "Downloaded file too small ($fileSize bytes). Likely HTML or error page."
 }
 
 Write-Host "Download validated ($fileSize bytes)."
 
-# ---------------- Execute child script (HARD FAIL MODE) ----------------
-Write-Host "Executing application install script..."
+# ---------------- Execute (HARD FAIL MODE) ----------------
+Write-Host "Executing Image-Builder script..."
 
-$childCommand = @"
+$command = @"
 Set-StrictMode -Version Latest
 `$ErrorActionPreference = 'Stop'
 & '$ScriptPath'
@@ -92,11 +59,10 @@ Set-StrictMode -Version Latest
 powershell.exe `
     -NoProfile `
     -ExecutionPolicy Bypass `
-    -Command $childCommand
+    -Command $command
 
 if ($LASTEXITCODE -ne 0) {
-    throw "Child install script failed with exit code $LASTEXITCODE"
+    throw "Image-Builder.ps1 exited with code $LASTEXITCODE"
 }
 
-Write-Host "Application installation completed successfully."
-Write-Host "AIB customization step finished cleanly."
+Write-Host "Bootstrapper completed successfully."
