@@ -32,8 +32,7 @@ try {
     # ---------------- Acquire Managed Identity Token ----------------
     Write-Host "Requesting Managed Identity token from IMDS..."
 
-    $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token" +
-               "?api-version=2021-02-01&resource=https://storage.azure.com/"
+    $imdsUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2021-02-01&resource=https://storage.azure.com/"
 
     $tokenResponse = Invoke-RestMethod `
         -Uri $imdsUri `
@@ -66,7 +65,7 @@ try {
 
     # ---------------- Validate Download ----------------
     if (-not (Test-Path $InstallerPath)) {
-        throw "Installer not found at $InstallerPath"
+        throw ("Installer not found at {0}" -f $InstallerPath)
     }
 
     $fileSize = (Get-Item $InstallerPath).Length
