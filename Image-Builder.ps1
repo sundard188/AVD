@@ -1,5 +1,6 @@
 # =====================================================
-# AIB Bootstrapper – FINAL AIB-SAFE (GitHub → MI → Blob)
+# AIB Bootstrapper – FINAL (MI → Blob → Install)
+# AIB / Packer SAFE
 # =====================================================
 
 Set-StrictMode -Version Latest
@@ -13,9 +14,9 @@ try {
     $Container      = "image"
     $InstallerName  = "02-App-Install-FINAL.ps1"
 
+    $InstallerUri   = "https://$StorageAccount.blob.core.windows.net/$Container/$InstallerName"
     $TempPath       = "C:\AIB"
     $InstallerPath  = Join-Path $TempPath $InstallerName
-    $InstallerUri   = "https://$StorageAccount.blob.core.windows.net/$Container/$InstallerName"
 
     # ---------------- Prep ----------------
     if (-not (Test-Path $TempPath)) {
@@ -23,26 +24,83 @@ try {
     }
 
     $TranscriptPath = Join-Path $TempPath "bootstrapper-transcript.log"
-    Start-Transcript -Path $TranscriptPath -Append -Force
+    Start-Transcript -Path $TranscriptPath -Force
 
     Write-Host "=============================================="
     Write-Host "AIB Bootstrapper - Managed Identity Mode"
     Write-Host "=============================================="
 
-    # ---------------- Managed Identity Token ----------------
-    Write-Host "Requesting Managed Identity token"
+    # ---------------- IMDS Readiness ----------------
+    Write-Host "Waiting for IMDS..."
 
-    $amp = [char]38
-    $imdsBase = "http://169.254.169.254/metadata/identity/oauth2/token"
-    $imdsQuery = "api-version=2021-02-01${amp}resource=https://storage.azure.com/"
-    $imdsUri = "$imdsBase?$imdsQuery"
+    $imdsReady = $false
+    for ($i = 1; $i -le 12; $i++) {
+        try {
+            Invoke-RestMethod `
+                -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" `
+                -Headers @{ Metadata = "true" } `
+                -TimeoutSec 5 | Out-Null
 
-    $tokenResponse = Invoke-RestMethod `
-        -Uri $imdsUri `
-        -Headers @{ Metadata = "true" } `
-        -Method GET
+            $imdsReady = $true
+            break
+        }
+        catch {
+            Write-Host "IMDS not ready (attempt $i)"
+            Start-Sleep -Seconds 5
+        }
+    }
 
-    $accessToken = $tokenResponse.access_token
+    if (-not $imdsReady) {
+        throw "IMDS did not become ready"
+    }
+
+    Write-Host "IMDS is reachable"
+
+    # ---------------- Identity Validation ----------------
+    Write-Host "Validating managed identity attachment..."
+
+    $identityInfo = Invoke-RestMethod `
+        -Uri "http://169.254.169.254/metadata/instance/identity?api-version=2021-02-01" `
+        -Headers @{ Metadata = "true" }
+
+    if (-not $identityInfo) {
+        throw "No managed identity metadata returned"
+    }
+
+    Write-Host "Identity type detected: $($identityInfo.type)"
+
+    if ($identityInfo.type -notmatch "UserAssigned") {
+        throw "Expected user-assigned managed identity but none detected"
+    }
+
+    Write-Host "User-assigned identity confirmed"
+
+    # ---------------- Token Acquisition ----------------
+    Write-Host "Requesting Managed Identity token..."
+
+    $resource = [System.Uri]::EscapeDataString("https://storage.azure.com/")
+    $tokenUri = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2021-02-01&resource=$resource"
+
+    $accessToken = $null
+
+    for ($i = 1; $i -le 10; $i++) {
+        try {
+            $tokenResponse = Invoke-RestMethod `
+                -Uri $tokenUri `
+                -Headers @{ Metadata = "true" } `
+                -Method GET `
+                -TimeoutSec 10
+
+            if ($tokenResponse.access_token) {
+                $accessToken = $tokenResponse.access_token
+                break
+            }
+        }
+        catch {
+            Write-Host "Token request failed (attempt $i)"
+            Start-Sleep -Seconds 5
+        }
+    }
 
     if (-not $accessToken) {
         throw "Managed Identity token acquisition failed"
@@ -50,38 +108,49 @@ try {
 
     Write-Host "Managed Identity token acquired"
 
-    # ---------------- Download Installer ----------------
-    Write-Host "Downloading installer from private Blob"
+    # ---------------- Blob Access Validation ----------------
+    Write-Host "Validating Blob access permissions..."
 
-    $headers = @{
+    $authHeaders = @{
         Authorization  = "Bearer $accessToken"
         "x-ms-version" = "2021-08-06"
     }
 
+    try {
+        Invoke-WebRequest `
+            -Uri $InstallerUri `
+            -Headers $authHeaders `
+            -Method Head `
+            -TimeoutSec 30 | Out-Null
+    }
+    catch {
+        throw "Blob access denied. Verify Storage Blob Data Reader role."
+    }
+
+    Write-Host "Blob access confirmed"
+
+    # ---------------- Download Installer ----------------
+    Write-Host "Downloading installer from Blob..."
+
     Invoke-WebRequest `
         -Uri $InstallerUri `
-        -Headers $headers `
+        -Headers $authHeaders `
         -OutFile $InstallerPath `
-        -UseBasicParsing `
         -TimeoutSec 120
 
-    # ---------------- Validate Download ----------------
     if (-not (Test-Path $InstallerPath)) {
-        throw "Installer file missing after download"
+        throw "Installer was not downloaded"
     }
 
     $fileSize = (Get-Item $InstallerPath).Length
-
     if ($fileSize -lt 1024) {
-        Write-Host "Installer content diagnostic output"
-        Get-Content $InstallerPath | Write-Host
-        throw ("Installer file too small. Size = {0} bytes" -f $fileSize)
+        throw "Installer file size invalid"
     }
 
-    Write-Host ("Installer download successful. Size = {0} bytes" -f $fileSize)
+    Write-Host "Installer downloaded successfully"
 
     # ---------------- Execute Installer ----------------
-    Write-Host "Executing installer script"
+    Write-Host "Executing installer..."
 
     powershell.exe `
         -NoProfile `
@@ -89,10 +158,10 @@ try {
         -File $InstallerPath
 
     if ($LASTEXITCODE -ne 0) {
-        throw ("Installer execution failed. Exit code = {0}" -f $LASTEXITCODE)
+        throw "Installer execution failed"
     }
 
-    Write-Host "Installer completed successfully"
+    Write-Host "Installer execution completed successfully"
     Write-Host "Bootstrapper completed successfully"
 
     Stop-Transcript | Out-Null
@@ -100,11 +169,11 @@ try {
 }
 catch {
     Write-Error "BOOTSTRAPPER FAILED"
-    Write-Error ("Error message: {0}" -f $_.Exception.Message)
-    Write-Error ("Script stack trace: {0}" -f $_.ScriptStackTrace)
+    Write-Error $_.Exception.Message
 
     if ($TranscriptPath) {
         Stop-Transcript | Out-Null
     }
+
     exit 1
 }
